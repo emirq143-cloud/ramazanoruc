@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.compose.foundation.isSystemInDarkTheme
 import org.json.JSONArray
 import org.json.JSONObject
@@ -71,6 +73,7 @@ import java.time.chrono.HijrahDate
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
+import com.emir.oructakibi.ui.screens.WorshipScreen
 import java.text.Normalizer
 
 class MainActivity : ComponentActivity() {
@@ -121,15 +124,22 @@ private fun SplashScreen() {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Image(
-                painter = painterResource(id = R.drawable.app_icon),
+                painter = painterResource(id = R.drawable.ic_launcher_foreground),
                 contentDescription = "App Icon",
                 modifier = Modifier
-                    .size(148.dp)
-                    .clip(RoundedCornerShape(28.dp))
+                    .size(160.dp)
+                    .background(Color(0xFF0B6E4F), RoundedCornerShape(32.dp))
+                    .padding(24.dp)
                     .scale(scale)
             )
-            Spacer(Modifier.height(16.dp))
-            Text("ORUÇ REHBERİ", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 26.sp)
+            Spacer(Modifier.height(24.dp))
+            Text(
+                "ORUÇ REHBERİ",
+                color = Color(0xFFFFD700),
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 28.sp,
+                letterSpacing = 2.sp
+            )
         }
     }
 }
@@ -148,6 +158,7 @@ private const val KEY_KAZA_WEEKLY_PLAN = "kaza_weekly_plan"
 private const val KEY_THEME_MODE = "theme_mode"
 private const val KEY_FONT_SCALE = "font_scale"
 private const val KEY_REMINDER_TYPE = "reminder_type"
+private const val KEY_QURAN_PAGE = "quran_page"
 
 private fun loadCity(ctx: Context): String =
     ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CITY, "İstanbul")
@@ -428,9 +439,9 @@ private fun kazaPlanStreakWeeks(today: LocalDate, kazaDates: Set<String>, weekly
 }
 
 private fun reminderMessage(type: Int): String = when (type) {
-    1 -> "İftar sonrası oruç durumunu işaretlemeyi unutma."
-    2 -> "Sahur öncesi niyetini tazele, gününü planla."
-    else -> "Bugünkü oruç durumunu uygulamada işaretlemeyi unutma."
+    1 -> "İftar vakti yaklaşıyor, sofraya buyurun! ✨"
+    2 -> "Sahur vakti, niyet etmeyi unutma! ✨"
+    else -> "Bugünkü oruç durumunu işaretlemeyi unutma."
 }
 
 private fun specialDayHint(today: LocalDate): String {
@@ -620,17 +631,22 @@ private fun tryUpdateCityFromLocation(
             else -> null
         }
         if (provider != null) {
-            runCatching {
-                lm.getCurrentLocation(
-                    provider,
-                    CancellationSignal(),
-                    ctx.mainExecutor
-                ) { loc ->
-                    if (loc != null) handleLocation(loc.latitude, loc.longitude)
-                    else onError("Konum alınamadı. Konum servisinin açık olduğundan emin ol.")
+            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                runCatching {
+                    lm.getCurrentLocation(
+                        provider,
+                        CancellationSignal(),
+                        ctx.mainExecutor
+                    ) { loc ->
+                        if (loc != null) handleLocation(loc.latitude, loc.longitude)
+                        else onError("Konum alınamadı. Konum servisinin açık olduğundan emin ol.")
+                    }
+                }.onFailure {
+                    onError("Konum alınamadı. Konum servisinin açık olduğundan emin ol.")
                 }
-            }.onFailure {
-                onError("Konum alınamadı. Konum servisinin açık olduğundan emin ol.")
+            } else {
+                onError("Konum izni eksik.")
             }
             return
         }
@@ -662,7 +678,7 @@ fun OrucTakipApp() {
     var errorTimes by remember { mutableStateOf<String?>(null) }
 
     var currentYM by remember { mutableStateOf(YearMonth.now()) }
-    var summaryYear by remember { mutableStateOf(LocalDate.now().year) }
+    var summaryYear by remember { mutableIntStateOf(LocalDate.now().year) }
 
     val fastViewModel: FastViewModel = viewModel()
     val fastedDates by fastViewModel.fastedDates.collectAsState()
@@ -674,12 +690,49 @@ fun OrucTakipApp() {
     var weeklyTarget by remember { mutableStateOf(loadWeeklyTarget(ctx)) }
     var kazaWeeklyPlan by remember { mutableStateOf(loadKazaWeeklyPlan(ctx)) }
     var themeMode by remember { mutableStateOf(loadThemeMode(ctx)) }
-    var fontScale by remember { mutableStateOf(loadFontScale(ctx)) }
+    var fontScale by remember { mutableFloatStateOf(loadFontScale(ctx)) }
     var showLocationAsk by remember { mutableStateOf(!loadLocationAsked(ctx)) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var showShareCard by remember { mutableStateOf(false) }
     var importText by remember { mutableStateOf("") }
 
-    var tabIndex by remember { mutableStateOf(0) } // 0=Takvim, 1=Yıllık, 2=Kaza, 3=Ayarlar
+    var tabIndex by remember { mutableStateOf(0) } // 0=Takvim, 1=Yıllık, 2=Kaza, 3=Ayarlar, 4=İbadet
+
+    // YENİ ÖZELLİKLER İÇİN STATE'LER
+    var zikirCount by remember { mutableIntStateOf(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("zikir_count", 0)) }
+    var quranPage by remember { mutableIntStateOf(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_QURAN_PAGE, 1)) }
+    val prayerList = remember { mutableStateListOf("Sabah", "Öğle", "İkindi", "Akşam", "Yatsı", "Teravih") }
+    val checkedPrayers = remember { mutableStateListOf<String>() }
+    var countdownLabel by remember { mutableStateOf("Vakit Bekleniyor") }
+    var countdownText by remember { mutableStateOf("--:--:--") }
+
+    LaunchedEffect(todayFajr, todayMaghrib) {
+        while (true) {
+            val now = LocalTime.now()
+            val fajr = runCatching { LocalTime.parse(todayFajr) }.getOrNull()
+            val maghrib = runCatching { LocalTime.parse(todayMaghrib) }.getOrNull()
+
+            if (fajr != null && maghrib != null) {
+                when {
+                    now.isBefore(fajr) -> {
+                        countdownLabel = "İmsak'a Kalan"
+                        val diff = java.time.Duration.between(now, fajr)
+                        countdownText = String.format(Locale.getDefault(), "%02d:%02d:%02d", diff.toHours(), diff.toMinutesPart(), diff.toSecondsPart())
+                    }
+                    now.isAfter(fajr) && now.isBefore(maghrib) -> {
+                        countdownLabel = "İftar'a Kalan"
+                        val diff = java.time.Duration.between(now, maghrib)
+                        countdownText = String.format(Locale.getDefault(), "%02d:%02d:%02d", diff.toHours(), diff.toMinutesPart(), diff.toSecondsPart())
+                    }
+                    else -> {
+                        countdownLabel = "Hayırlı İftarlar"
+                        countdownText = "Vakit Tamam"
+                    }
+                }
+            }
+            delay(1000)
+        }
+    }
 
     val suAnkiSeri = currentStreakInMonth(fastedDates, currentYM, today)
     val enUzunSeri = longestStreakInMonth(fastedDates, currentYM)
@@ -703,7 +756,7 @@ fun OrucTakipApp() {
     val yearTotalDays = yearSummaries.sumOf { it.totalDays }.coerceAtLeast(1)
     val yearRate = (yearFastTotal * 100f) / yearTotalDays
 
-    val bgPainter = runCatching { painterResource(id = R.drawable.ramadan_bg) }.getOrNull()
+    val bgPainter = painterResource(id = R.drawable.ramadan_bg)
     val isRamadan = remember(today) {
         HijrahDate.from(today).get(java.time.temporal.ChronoField.MONTH_OF_YEAR) == 9
     }
@@ -715,11 +768,6 @@ fun OrucTakipApp() {
         1 -> false
         2 -> true
         else -> systemDark || isAfterIftar
-    }
-    val fallbackBg = if (isRamadan || darkByTheme) {
-        Brush.verticalGradient(listOf(Color(0xFF102A43), Color(0xFF243B53)))
-    } else {
-        Brush.verticalGradient(listOf(Color(0xFFFDF6EC), Color(0xFFE8F5E9)))
     }
     val nightOverlay = if (darkByTheme || isAfterIftar) Color(0x55000000) else Color(0xAAFFFFFF)
     val contents = remember { loadDailyContents(ctx) }
@@ -832,8 +880,7 @@ fun OrucTakipApp() {
 
     val density = LocalDensity.current
     CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
-    Box(Modifier.fillMaxSize()) {
-        if (bgPainter != null) {
+        Box(Modifier.fillMaxSize()) {
             Image(
                 painter = bgPainter,
                 contentDescription = null,
@@ -845,20 +892,13 @@ fun OrucTakipApp() {
                     .fillMaxSize()
                     .background(nightOverlay)
             )
-        } else {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(fallbackBg)
-            )
-        }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+            ) {
 
             // ÜST KART
             Surface(
@@ -867,18 +907,32 @@ fun OrucTakipApp() {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(Modifier.padding(16.dp)) {
-                    Text(
-                        "Oruç Takibi",
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Şu anki seri: $suAnkiSeri  •  En uzun seri: $enUzunSeri",
-                        color = Color.White, fontSize = 13.sp * fontScale
-                    )
-                    Spacer(Modifier.height(2.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Oruç Takibi",
+                                color = Color.White,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Şu anki seri: $suAnkiSeri  •  En uzun seri: $enUzunSeri",
+                                color = Color.White, fontSize = 13.sp * fontScale
+                            )
+                        }
+
+                        // CANLI GERİ SAYIM
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(countdownLabel, color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                            Text(countdownText, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
                     Text(
                         "Hicri: ${hijriDateText(today)}",
                         color = Color.White, fontSize = 13.sp * fontScale
@@ -921,6 +975,10 @@ fun OrucTakipApp() {
                     selected = tabIndex == 2,
                     onClick = { tabIndex = 2 },
                     text = { Text("Kaza") })
+                Tab(
+                    selected = tabIndex == 4,
+                    onClick = { tabIndex = 4 },
+                    text = { Text("İbadet") })
                 Tab(
                     selected = tabIndex == 3,
                     onClick = { tabIndex = 3 },
@@ -1059,6 +1117,43 @@ fun OrucTakipApp() {
                         } else {
                             Text(specialDayHint(today), fontSize = 13.sp)
                         }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // GÜNÜN SORUSU
+                val questions = listOf(
+                    "Kuran-ı Kerim kaç cüzdür?" to "30",
+                    "Peygamberimiz nerede doğmuştur?" to "Mekke",
+                    "İslamın şartı kaçtır?" to "5"
+                )
+                val qIdx = today.dayOfYear % questions.size
+                var showAns by remember { mutableStateOf(false) }
+                Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFFE3F2FD), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("Günün Sorusu", fontWeight = FontWeight.Bold, color = Color(0xFF1976D2), fontSize = 14.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(questions[qIdx].first, fontSize = 13.sp)
+                        if (showAns) {
+                            Text("Cevap: ${questions[qIdx].second}", fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32), fontSize = 13.sp)
+                        }
+                        TextButton(onClick = { showAns = !showAns }) { Text(if (showAns) "Cevabı Gizle" else "Cevabı Gör") }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // TOPLULUK BİLGİSİ
+                Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFFFFF3E0), modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp).background(Color(0xFF0B6E4F), RoundedCornerShape(4.dp))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Bugün ${1200 + (today.dayOfYear % 500)} kişi seninle birlikte takipte!", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                     }
                 }
 
@@ -1227,25 +1322,6 @@ fun OrucTakipApp() {
                         Text("Yıllık toplam kaza: $yearKazaTotal", fontSize = 13.sp)
                         Text("Yıllık tutma oranı: %${yearRate.toInt()}", fontSize = 13.sp)
                         Text("Genel en uzun seri: $genelEnUzunSeri gün", fontSize = 13.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Text("Aylık Bar Chart", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(80.dp),
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                            verticalAlignment = Alignment.Bottom
-                        ) {
-                            yearSummaries.forEach { ms ->
-                                val ratio = ms.fastCount.toFloat() / ms.totalDays.coerceAtLeast(1)
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight(ratio.coerceIn(0.05f, 1f))
-                                        .background(Color(0xFF66BB6A), RoundedCornerShape(4.dp))
-                                )
-                            }
-                        }
                     }
                 }
 
@@ -1257,29 +1333,6 @@ fun OrucTakipApp() {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("Heatmap (Son 35 Gün)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        Spacer(Modifier.height(8.dp))
-                        val heatDates =
-                            (34 downTo 0).map { today.minusDays(it.toLong()).format(fmt) }
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            heatDates.chunked(7).forEach { row ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    row.forEach { ds ->
-                                        val c = when {
-                                            fastedDates.contains(ds) -> Color(0xFF43A047)
-                                            kazaDates.contains(ds) -> Color(0xFFFBC02D)
-                                            else -> Color(0xFFE0E0E0)
-                                        }
-                                        Box(
-                                            modifier = Modifier
-                                                .size(14.dp)
-                                                .background(c, RoundedCornerShape(3.dp))
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(10.dp))
                         Text("12 Ay Raporu", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Spacer(Modifier.height(8.dp))
 
@@ -1380,6 +1433,23 @@ fun OrucTakipApp() {
                         Text("Tahmini bitiş: $estimatedFinishDate", fontSize = 13.sp)
                     }
                 }
+            } else if (tabIndex == 4) {
+                WorshipScreen(
+                    ctx = ctx,
+                    zikirCount = zikirCount,
+                    onZikirChange = { 
+                        zikirCount = it
+                        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("zikir_count", it).apply()
+                    },
+                    quranPage = quranPage,
+                    onQuranPageChange = {
+                        quranPage = it
+                        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_QURAN_PAGE, it).apply()
+                    },
+                    prayerList = prayerList,
+                    checkedPrayers = checkedPrayers,
+                    today = today
+                )
             } else {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
@@ -1580,6 +1650,15 @@ fun OrucTakipApp() {
                         Spacer(Modifier.height(10.dp))
                         OutlinedButton(
                             modifier = Modifier.fillMaxWidth(),
+                            onClick = { showShareCard = true },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF2E7D32))
+                        ) { 
+                            Text("Şık Paylaşım Kartı Oluştur ✨")
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 val shareText =
                                     "Bu ay ${monthSummary.fastCount} gün oruç tuttum. Ramazan Oruç Takibi ile takip ediyorum."
@@ -1624,6 +1703,17 @@ fun OrucTakipApp() {
                             "Uygulama internet ve bildirim izni kullanır. Store sayfasına gizlilik politikası linki eklemeyi unutma.",
                             fontSize = 12.sp
                         )
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_VIEW, "https://github.com/emirq143-cloud/ramazanoruc/blob/main/PRIVACY_POLICY.md".toUri())
+                                ctx.startActivity(intent)
+                            },
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        ) {
+                            Text("Gizlilik Politikası'nı Oku", color = Color(0xFF1976D2), fontSize = 13.sp)
+                        }
+
                         Spacer(Modifier.height(10.dp))
                         OutlinedButton(
                             modifier = Modifier.fillMaxWidth(),
@@ -1658,6 +1748,41 @@ fun OrucTakipApp() {
             }
         }
     }
+    }
+
+    if (showShareCard) {
+        AlertDialog(
+            onDismissRequest = { showShareCard = false },
+            confirmButton = { TextButton(onClick = { showShareCard = false }) { Text("Kapat") } },
+            title = { Text("Başarı Kartın") },
+            text = {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF102A43),
+                    modifier = Modifier.fillMaxWidth().height(300.dp)
+                ) {
+                    Box(Modifier.fillMaxSize()) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                            contentDescription = null,
+                            modifier = Modifier.size(100.dp).align(Alignment.TopEnd).padding(16.dp).alpha(0.2f)
+                        )
+                        Column(Modifier.padding(24.dp).align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("ORUÇ REHBERİ", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(16.dp))
+                            Text("MAŞALLAH!", color = Color(0xFFFFF176), fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+                            Spacer(Modifier.height(8.dp))
+                            Text("Bu ay ${monthSummary.fastCount} gün oruç tuttum.", color = Color.White, textAlign = TextAlign.Center, fontSize = 18.sp)
+                            Spacer(Modifier.height(16.dp))
+                            Surface(color = Color.White.copy(alpha = 0.1f), shape = RoundedCornerShape(8.dp)) {
+                                Text(badge, color = Color.White, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), fontSize = 14.sp)
+                            }
+                        }
+                        Text("emirq143-cloud/ramazanoruc", color = Color.White.copy(alpha = 0.3f), fontSize = 10.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp))
+                    }
+                }
+            }
+        )
     }
 
     if (showImportDialog) {
